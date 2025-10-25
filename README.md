@@ -58,3 +58,5 @@ Edit `Config` class in the code to customize:
 - Retrieval parameters
 - Auto-update schedule
 - Credibility scoring
+# rag-chatbot
+RAG LLM Chatbot
