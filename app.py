@@ -126,6 +126,9 @@ class Config:
     # Reranker
     RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     
+    # Disable local storage
+    USE_LOCAL_QDRANT = False
+    
     # ========== RETRIEVAL SETTINGS ==========
     CHUNK_SIZE = 1500  # Increased from 1000 to capture complete pricing tables
     CHUNK_OVERLAP = 300  # Increased from 200 for better context preservation
