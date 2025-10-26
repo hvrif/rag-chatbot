@@ -18,7 +18,7 @@ from collections import deque
 
 from openai import OpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
@@ -41,23 +41,65 @@ class Config:
     JSONL_FILE_DATASET = "./Dataset/ihrp_dataset_cleaned_final.jsonl"
     
     WEBSITE_URLS = [
+
+         # General Overview Pages
         "https://ihrp.sg/certifications-overview/",
         "https://ihrp.sg/enhanced-subsidy-for-hr-certification/",
         "https://ihrp.sg/renew-your-certification/",
+
+        # IHRP-CA: Certified Associate (Use specific section links for clarity)
+        # Fix for CA
+        # IHRP-CA: Certified Associate - More explicit URLs
         "https://ihrp.sg/certifications/ihrp-certified-associate-ihrp-ca/?id-process=id-overview",
         "https://ihrp.sg/certifications/ihrp-certified-associate-ihrp-ca/?id-process=id-fee",
         "https://ihrp.sg/certifications/ihrp-certified-associate-ihrp-ca/?id-process=id-date",
         "https://ihrp.sg/certifications/ihrp-certified-associate-ihrp-ca/?id-process=id-process",
         "https://ihrp.sg/certifications/ihrp-certified-associate-ihrp-ca/?id-process=id-preparation",
+
+        # IHRP-CP: Certified Professional (Use specific section links for clarity - ASSUMING STRUCTURE IS SIMILAR TO CA)
+        # Suggested Fix for CP (Requires verification of the actual CP tab IDs)
         "https://ihrp.sg/certifications/ihrp-certified-professional-ihrp-cp/?id-process=id-overview",
         "https://ihrp.sg/certifications/ihrp-certified-professional-ihrp-cp/?id-process=id-fee",
         "https://ihrp.sg/certifications/ihrp-certified-professional-ihrp-cp/?id-process=id-process",
         "https://ihrp.sg/certifications/ihrp-certified-professional-ihrp-cp/?id-process=id-preparation",
+
+        # IHRP-SP: Senior Professional (Keeping original for general coverage)
         "https://ihrp.sg/certifications/certified-ihrp-senior-professional-ihrp-sp/",
+        
+        # Other Key Pages (Retained from original list)
+        "https://ihrp.sg/microsoftcrmportals.com/professionals/",
         "https://ihrp.sg/body-of-competencies/",
+        "https://ihrp.sg/context-and-methodology/",
+        "https://ihrp.sg/case-studies/",
+        "https://ihrp.sg/explore-job-roles/",
+        "https://ihrp.sg/tools-and-resources/",
+        "https://ihrp.sg/job-redesign-evaluation-tool/?tab=overview/",
+        "https://ihrp.sg/job-redesign-evaluation-tool/?tab=jr-process/",
+        "https://ihrp.sg/job-redesign-evaluation-tool/?tab=jr-expert-panel/",
+        "https://ihrp.sg/job-redesign-evaluation-tool/?tab=resources/",
+        "https://ihrp.sg/job-redesign-evaluation-tool/?tab=jr-evaluation-tool/",
+        "https://ihrp.sg/hcdt-overview/",
+        "https://ihrp.sg/for-organisation/",
+        "https://ihrp.sg/skill-badges-overview/",
         "https://ihrp.sg/for-professionals/",
         "https://ihrp.sg/find-a-course/",
+        "https://ihrp.sg/corporate-partner-programme-overview/",
+        "https://ihrp.sg/eco-system-partnership/",
+        "https://ihrp.sg/international-recognition/",
+        "https://ihrp.sg/cipd-partnership/",
+        "https://ihrp.sg/shrm-partnership/",
+        "https://ihrp.sg/resources-overview/",
+        "https://ihrp.sg/playbooks/",
+        "https://ihrp.sg/resources/research-insights/",
+        "https://ihrp.sg/about-ihrp/",
+        "https://ihrp.sg/our-board/",
+        "https://ihrp.sg/our-management/",
+        "https://ihrp.sg/our-committees/",
+        "https://ihrp.sg/ihrp-master-professionals/"
+
+
     ]
+    
     
     # Source credibility weights
     SOURCE_CREDIBILITY = {
@@ -79,16 +121,16 @@ class Config:
     
     # LLM settings
     LLM_MODEL = "gpt-4o"
-    LLM_TEMPERATURE = 0.3
+    LLM_TEMPERATURE = 0.1
     
     # Reranker
     RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     
     # ========== RETRIEVAL SETTINGS ==========
-    CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
-    INITIAL_K = 20
-    FINAL_K = 6
+    CHUNK_SIZE = 1500  # Increased from 1000 to capture complete pricing tables
+    CHUNK_OVERLAP = 300  # Increased from 200 for better context preservation
+    INITIAL_K = 25  # Increased from 20 for more comprehensive retrieval
+    FINAL_K = 8  
     
     # ========== MEMORY & GUARDRAILS ==========
     CONVERSATION_MEMORY_WINDOW = 10  # messages
@@ -377,7 +419,7 @@ Return ONLY a JSON object with:
             }
 
 # ============================================================================
-# DATA LOADER
+# DATA LOADER - FIXED VERSION
 # ============================================================================
 
 class DataLoader:
@@ -410,7 +452,8 @@ Answer: {output}"""
                                 'source': source_name,
                                 'question': instruction,
                                 'type': source_type,
-                                'index': line_num
+                                'index': line_num,
+                                'certification_level': 'unknown'  # JSONL doesn't have URL
                             }
                         )
                         documents.append(doc)
@@ -428,6 +471,7 @@ Answer: {output}"""
     
     @staticmethod
     def load_websites(urls, timeout_ms, return_content_pairs=False):
+        """Enhanced web scraping with proper dynamic tab handling"""
         if not urls:
             return [] if not return_content_pairs else ([], [])
 
@@ -439,53 +483,125 @@ Answer: {output}"""
         
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                )
+                page = context.new_page()
                 page.set_default_timeout(timeout_ms)
 
                 for idx, url in enumerate(urls, 1):
                     try:
                         print(f"  [{idx}/{len(urls)}] {url}")
-                        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-                        content = page.content()
                         
+                        # Navigate to page
+                        page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                        
+                        # Special handling for pages with tab parameters
+                        if '?id-process=' in url or '?tab=' in url:
+                            try:
+                                page.wait_for_selector(".tab-content, .elementor-tab-content", timeout=10000)
+                            except:
+                                pass
+                            
+                            tab_param = url.split('?')[-1].split('=')[-1] if '?' in url else None
+                            if tab_param:
+                                selectors_to_try = [
+                                    f"[data-tab='{tab_param}']",
+                                    f"a[href*='{tab_param}']",
+                                    f".elementor-tab-title[data-tab='{tab_param}']",
+                                    f"[id*='{tab_param}']"
+                                ]
+                                
+                                for selector in selectors_to_try:
+                                    try:
+                                        if page.locator(selector).count() > 0:
+                                            page.locator(selector).first.click()
+                                            print(f"    ✓ Clicked tab: {tab_param}")
+                                            page.wait_for_timeout(2000)
+                                            break
+                                    except:
+                                        continue
+                        
+                        page.wait_for_timeout(3000)
+                        
+                        try:
+                            page.wait_for_selector("main, .entry-content, .elementor-widget-container", 
+                                                 timeout=5000, state="visible")
+                        except:
+                            pass
+                        
+                        content = page.content()
                         soup = BeautifulSoup(content, 'html.parser')
-                        for script_or_style in soup(["script", "style"]):
-                            script_or_style.extract() 
-                        text_content = soup.get_text(separator=' ', strip=True)
-
+                        
+                        for element in soup(["script", "style", "nav", "header", "footer", 
+                                           "iframe", "noscript"]):
+                            element.extract()
+                        
+                        main_content = soup.find('main') or soup.find(class_='entry-content')
+                        if main_content:
+                            text_content = main_content.get_text(separator=' ', strip=True)
+                        else:
+                            text_content = soup.get_text(separator=' ', strip=True)
+                        
+                        text_content = ' '.join(text_content.split())
+                        
+                        if len(text_content.strip()) < 100:
+                            print(f"    ⚠️ Warning: Low content extracted ({len(text_content)} chars)")
+                        
+                        # Detect certification level from URL
+                        cert_level = 'unknown'
+                        if 'certified-associate' in url or 'ihrp-ca' in url:
+                            cert_level = 'CA'
+                        elif 'certified-professional' in url or 'ihrp-cp' in url:
+                            cert_level = 'CP'
+                        elif 'senior-professional' in url or 'ihrp-sp' in url:
+                            cert_level = 'SP'
+                        
                         doc = Document(
                             page_content=text_content,
                             metadata={
                                 'source': url,
                                 'type': 'website',
+                                'certification_level': cert_level,
                                 'title': page.title() if page.title() else url,
-                                'last_updated': datetime.now().isoformat()
+                                'last_updated': datetime.now().isoformat(),
+                                'content_length': len(text_content),
+                                'has_tab_param': '?' in url
                             }
                         )
                         documents.append(doc)
                         content_pairs.append((url, text_content))
                         successful_count += 1
+                        
+                        print(f"    ✓ Extracted {len(text_content)} characters (Level: {cert_level})")
 
                     except PlaywrightTimeoutError:
                         print(f"    ❌ Failed: Timeout")
                     except Exception as e:
-                        print(f"    ❌ Failed: {type(e).__name__}")
+                        print(f"    ❌ Failed: {type(e).__name__}: {str(e)[:50]}")
                 
+                context.close()
                 browser.close()
+                
         except Exception as e:
             print(f"❌ Critical Error: {e}")
+            import traceback
+            traceback.print_exc()
             return [] if not return_content_pairs else ([], [])
 
-        print(f"\n✅ Loaded {successful_count} pages successfully")
-        documents = [doc for doc in documents if len(doc.page_content.strip()) > 50]
+        print(f"\n✅ Successfully loaded {successful_count}/{len(urls)} pages")
+        
+        documents = [doc for doc in documents if len(doc.page_content.strip()) > 100]
+        print(f"📊 Kept {len(documents)} documents after content filtering")
         
         if return_content_pairs:
             return documents, content_pairs
         return documents
 
 # ============================================================================
-# RAG FUSION RETRIEVER
+# COMPLETE RAG FUSION RETRIEVER - WITH BOTH METHODS
 # ============================================================================
 
 class RAGFusionRetriever:
@@ -500,30 +616,81 @@ class RAGFusionRetriever:
         self.reranker = reranker
         self.credibility_scorer = credibility_scorer
     
-    def retrieve_with_fusion(self, queries: List[str], k: int) -> List[Dict]:
-        """Retrieve documents using multiple strategies"""
+    def retrieve_with_fusion(self, queries: List[str], k: int, filter_cert_level: str = None) -> List[Dict]:
+        """Retrieve documents using multiple strategies with optional filtering"""
         all_results = []
         seen_ids = set()
+        
+        # Check if this is a pricing query
+        is_pricing_query = any(
+            term in ' '.join(queries).lower() 
+            for term in ['cost', 'fee', 'price', 'how much', 'subsidy', 'payment']
+        )
+        
+        # If pricing query without specific level, search all levels
+        if is_pricing_query and not filter_cert_level:
+            print("💰 Detected pricing query - retrieving from all certification levels")
+            filter_cert_level = None  # Ensure we get CA, CP, and SP results
         
         for query in queries:
             query_vector = self.embedding_model.encode(query).tolist()
             
-            # Strategy 1: Standard similarity search
-            results = self.qdrant_client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                limit=k
-            )
+            # Build filter if certification level specified
+            search_filter = None
+            if filter_cert_level and not is_pricing_query:
+                try:
+                    search_filter = Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.certification_level",
+                                match=MatchValue(value=filter_cert_level)
+                            )
+                        ]
+                    )
+                    print(f"🔍 Filtering for certification level: {filter_cert_level}")
+                except Exception as e:
+                    print(f"⚠️  Filtering not available: {e}")
+                    search_filter = None
             
-            for result in results:
-                if result.id not in seen_ids:
-                    seen_ids.add(result.id)
-                    all_results.append({
-                        'id': result.id,
-                        'content': result.payload['content'],
-                        'metadata': result.payload['metadata'],
-                        'score': result.score
-                    })
+            try:
+                results = self.qdrant_client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    query_filter=search_filter,
+                    limit=k if not is_pricing_query else k * 2  # Get more results for pricing
+                )
+                
+                for result in results:
+                    if result.id not in seen_ids:
+                        seen_ids.add(result.id)
+                        all_results.append({
+                            'id': result.id,
+                            'content': result.payload['content'],
+                            'metadata': result.payload['metadata'],
+                            'score': result.score
+                        })
+            
+            except Exception as e:
+                if search_filter:
+                    print(f"⚠️  Filtered search failed, retrying without filter...")
+                    results = self.qdrant_client.search(
+                        collection_name=self.collection_name,
+                        query_vector=query_vector,
+                        query_filter=None,
+                        limit=k
+                    )
+                    
+                    for result in results:
+                        if result.id not in seen_ids:
+                            seen_ids.add(result.id)
+                            all_results.append({
+                                'id': result.id,
+                                'content': result.payload['content'],
+                                'metadata': result.payload['metadata'],
+                                'score': result.score
+                            })
+                else:
+                    raise e
         
         print(f"🔀 RAG Fusion: Retrieved {len(all_results)} unique documents")
         return all_results
@@ -562,39 +729,100 @@ class RAGFusionRetriever:
 # PROMPTS
 # ============================================================================
 
-ADVANCED_PROMPT = """You are an expert IHRP (Institute for Human Resource Professionals) advisor with deep knowledge of HR certifications and career pathways.
+ADVANCED_PROMPT = """You are IHRP-GEN, an expert advisor on all IHRP certifications (CA, CP, SP, MTP).
+Use the provided CONTEXT to answer accurately and in a professional, structured tone.
 
-CERTIFICATION GUIDELINES:
-- IHRP-CA (Certified Associate): For those NEW to HR with less than 3 years HR experience
-- IHRP-CP (Certified Professional): For professionals with 3-5 years HR experience OR significant transferable experience (business management, operations, etc.)
-- IHRP-SP (Senior Professional): For senior HR professionals with 8+ years strategic HR experience
+**CRITICAL PRICING GUIDELINES:**
+When answering about fees or costs:
 
-KEY REASONING PRINCIPLES:
-✓ Business management, operations, and leadership experience IS transferable to HR
-✓ Someone with 10+ years business experience should typically start at CP level, not CA
-✓ Explain your reasoning clearly and cite specific eligibility criteria
-✓ Use conversation history for contextual follow-ups
+1. **For general "How much does certification cost?" questions:**
+   - Present a COMPARISON TABLE showing all three main levels: CA, CP, SP
+   - Show BOTH Singaporean/PR subsidized rates AND Non-Singaporean rates
+   - Format: 
+     ```
+     Certification Level | SG/PR Standard Fee | Non-SG Standard Fee
+     IHRP-CA            | S$272.50          | S$272.50
+     IHRP-CP            | S$272.50          | S$1,635.00
+     IHRP-SP            | S$381.50          | S$2,725.00
+     ```
 
-IMPORTANT: Only provide information you are confident about. If uncertain, acknowledge limitations.
-**CRITICAL GUARDRAIL: If the CONTEXT INFORMATION is empty or completely irrelevant to the CURRENT QUESTION, you MUST politely refuse to answer and state that you are restricted to IHRP-related topics.**
+2. **For specific level questions (CA, CP, or SP):**
+   - Show the standard fees for THAT LEVEL ONLY
+   - Always include BOTH residency categories (SG/PR vs Non-SG)
+   - Mention Enhanced Subsidy option (lowers fee to ~S$163.50)
+   - Include recertification fee (S$490.50 for all levels)
+
+3. **CORRECT FEE STRUCTURE (from context):**
+   - **IHRP-CA**: S$272.50 for both SG/PR and Non-SG (standard)
+   - **IHRP-CP**: S$272.50 (SG/PR subsidized), S$1,635.00 (Non-SG)
+   - **IHRP-SP**: S$381.50 (SG/PR subsidized), S$2,725.00 (Non-SG)
+   - **Enhanced Subsidy**: Further reduces to ~S$163.50 for eligible SG/PR
+   - **Recertification**: S$490.50 (all levels, all nationalities)
+   - **Additional fees**: On-site assessment S$43.60, Re-assessment S$163.50
+
+4. **Other Important Points:**
+   - Subsidies only for Singapore Citizens/PRs
+   - SkillsFuture Credit can be used by eligible Singaporeans
+   - Certification valid for 3 years
+   - Enhanced Subsidy availability varies - check IHRP website
+
+5. **ALWAYS:**
+   - Use clear Markdown tables
+   - Distinguish between subsidized and unsubsidized rates
+   - Mention that fees are inclusive of GST
+   - Note that Enhanced Subsidy is subject to availability
+
+**For eligibility questions:**
+- List requirements as bullet points
+- Explain work experience requirements clearly
+- Mention educational prerequisites
+
+**AVOID:**
+- Mixing fees from different categories
+- Presenting incomplete pricing (must show both SG/PR and Non-SG)
+- Vague statements - be specific with exact amounts
+- Omitting the Enhanced Subsidy option
+
+**ALWAYS END WITH:**
+"For the most accurate and updated details, including current subsidy availability, please refer to the official IHRP website at https://ihrp.sg"
+
+---------------------
+CONTEXT:
+{context}
+---------------------
+
 CONVERSATION HISTORY:
 {chat_history}
 
-CONTEXT INFORMATION:
-{context}
+QUESTION:
+{question}
 
-CURRENT QUESTION: {question}
+Respond as a confident IHRP expert. If pricing is incomplete in context, acknowledge gaps but provide what is available."""
 
-YOUR RESPONSE (think step-by-step, be accurate):"""
+
+# ============================================================================
+# IMPROVED QUERY EXPANSION FOR PRICING QUESTIONS
+# ============================================================================
 
 QUERY_EXPANSION_PROMPT = """Given a user question about IHRP certifications, generate 3 related search queries.
 
 Question: {question}
 
-Generate 3 variations:
-1. About eligibility/requirements
-2. About certification process/benefits
-3. About related certifications/pathways
+Guidelines:
+- If question is about COSTS/FEES, generate queries about:
+  1. Standard fees and pricing structure
+  2. Subsidies and enhanced subsidy details  
+  3. Additional fees (on-site, re-assessment, recertification)
+
+- If question is about ELIGIBILITY, generate queries about:
+  1. Work experience requirements
+  2. Educational prerequisites
+  3. Assessment process
+
+- If question is about COMPARISON, generate queries about:
+  1. Differences between certification levels
+  2. Career progression pathways
+  3. Benefits of each level
 
 Return ONLY the 3 queries, one per line."""
 
@@ -619,21 +847,25 @@ class UltimateIHRPChatbot:
         self.guardrails = None
         self.update_thread = None
         
+# ============================================================================
+# FIXED SETUP METHOD WITH PAYLOAD INDEX
+# ============================================================================
+
     def setup(self):
         """Initialize the system"""
         print("\n" + "="*60)
         print("🚀 ULTIMATE IHRP RAG CHATBOT SETUP (NO LANGCHAIN)")
         print("="*60 + "\n")
-        
+    
         # Load models
         print("🔢 Loading embedding model...")
         self.embedding_model = SentenceTransformer(self.config.EMBEDDING_MODEL)
         print("✅ Embedding model loaded")
-        
+    
         print("🎯 Loading reranker...")
         self.reranker = CrossEncoder(self.config.RERANKER_MODEL)
         print("✅ Reranker loaded")
-        
+    
         # Setup Qdrant
         print("\n☁️  Setting up Qdrant...")
         if self.config.QDRANT_URL and self.config.QDRANT_API_KEY:
@@ -645,8 +877,10 @@ class UltimateIHRPChatbot:
         else:
             self.qdrant_client = QdrantClient(path="./qdrant_local")
             print("✅ Using local Qdrant")
-        
-        # Create collection
+    
+        # Create collection with payload schema
+        from qdrant_client.models import PayloadSchemaType
+    
         try:
             self.qdrant_client.create_collection(
                 collection_name=self.config.QDRANT_COLLECTION_NAME,
@@ -656,13 +890,32 @@ class UltimateIHRPChatbot:
                 )
             )
             print("✅ Created new collection")
-        except:
-            print("✅ Using existing collection")
         
+            # Create payload index for certification_level field
+            self.qdrant_client.create_payload_index(
+                collection_name=self.config.QDRANT_COLLECTION_NAME,
+                field_name="metadata.certification_level",
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+            print("✅ Created payload index for certification_level")
+        
+        except Exception as e:
+            print(f"⚠️  Collection may already exist: {e}")
+            # Try to create index anyway
+            try:
+                self.qdrant_client.create_payload_index(
+                    collection_name=self.config.QDRANT_COLLECTION_NAME,
+                    field_name="metadata.certification_level",
+                    field_schema=PayloadSchemaType.KEYWORD
+                )
+                print("✅ Created payload index for certification_level")
+            except:
+                print("✅ Using existing collection and index")
+    
         # Load documents
         all_documents = []
         content_pairs = []
-        
+    
         if self.config.USE_JSONL_FAQ:
             faq_docs = DataLoader.load_jsonl_file(
                 self.config.JSONL_FILE_FAQ, 
@@ -670,7 +923,7 @@ class UltimateIHRPChatbot:
                 'faq'
             )
             all_documents.extend(faq_docs)
-        
+    
         if self.config.USE_JSONL_DATASET:
             dataset_docs = DataLoader.load_jsonl_file(
                 self.config.JSONL_FILE_DATASET, 
@@ -678,7 +931,7 @@ class UltimateIHRPChatbot:
                 'dataset'
             )
             all_documents.extend(dataset_docs)
-        
+    
         if self.config.USE_WEBSITES:
             website_docs, content_pairs = DataLoader.load_websites(
                 self.config.WEBSITE_URLS,
@@ -686,9 +939,9 @@ class UltimateIHRPChatbot:
                 return_content_pairs=True
             )
             all_documents.extend(website_docs)
-        
+    
         print(f"\n📚 Total documents loaded: {len(all_documents)}")
-        
+    
         # Split documents
         print("\n✂️  Splitting documents...")
         text_splitter = TextSplitter(
@@ -697,18 +950,18 @@ class UltimateIHRPChatbot:
         )
         chunks = text_splitter.split_documents(all_documents)
         print(f"✅ Created {len(chunks)} chunks")
-        
+    
         # Create embeddings and upload to Qdrant
         print("\n💾 Creating embeddings and uploading to Qdrant...")
         points = []
         batch_size = 100
-        
+    
         for i, chunk in enumerate(chunks):
             if i % batch_size == 0:
                 print(f"  Processing {i}/{len(chunks)}...")
-            
+        
             vector = self.embedding_model.encode(chunk.page_content).tolist()
-            
+        
             point = PointStruct(
                 id=str(uuid4()),
                 vector=vector,
@@ -718,7 +971,7 @@ class UltimateIHRPChatbot:
                 }
             )
             points.append(point)
-            
+        
             # Upload in batches
             if len(points) >= batch_size:
                 self.qdrant_client.upsert(
@@ -726,21 +979,21 @@ class UltimateIHRPChatbot:
                     points=points
                 )
                 points = []
-        
+    
         # Upload remaining
         if points:
             self.qdrant_client.upsert(
                 collection_name=self.config.QDRANT_COLLECTION_NAME,
                 points=points
             )
-        
+    
         print("✅ All documents uploaded to Qdrant")
-        
+    
         # Initialize components
         if self.config.ENABLE_GUARDRAILS:
             self.guardrails = GuardrailsValidator(self.openai_client)
             print("✅ Guardrails enabled")
-        
+    
         self.fusion_retriever = RAGFusionRetriever(
             self.qdrant_client,
             self.config.QDRANT_COLLECTION_NAME,
@@ -748,7 +1001,7 @@ class UltimateIHRPChatbot:
             self.reranker,
             self.credibility_scorer
         )
-        
+    
         print("\n" + "="*60)
         print("✅ SETUP COMPLETE!")
         print("="*60 + "\n")
@@ -771,97 +1024,130 @@ class UltimateIHRPChatbot:
             return [question] + expanded[:3]
         except:
             return [question]
-    
+        
+# ============================================================================
+# CHATBOT ASK METHOD - FIXED VERSION
+# ============================================================================
+
     def ask(self, question: str) -> Tuple[str, Dict]:
-        """Ask a question"""
+        """Ask a question with improved pricing handling"""
         if not self.qdrant_client:
             return "❌ System not initialized.", {}
-        
+    
         try:
-            # Step 1: Expand query
+            question_lower = question.lower()
+        
+            # Detect if this is a pricing query
+            is_pricing_query = any(
+                term in question_lower 
+                for term in ['cost', 'fee', 'price', 'how much', 'subsidy', 'payment', 'expensive']
+            )
+        
+            # Detect certification level
+            cert_level = None
+            if any(term in question_lower for term in ['ca', 'certified associate', 'ihrp-ca', 'ihrp ca']):
+                cert_level = 'CA'
+            elif any(term in question_lower for term in ['cp', 'certified professional', 'ihrp-cp', 'ihrp cp']):
+                cert_level = 'CP'
+            elif any(term in question_lower for term in ['sp', 'senior professional', 'ihrp-sp', 'ihrp sp']):
+                cert_level = 'SP'
+        
+            # For generic pricing questions, don't filter by level
+            if is_pricing_query and not cert_level:
+                print("💰 Generic pricing question detected - will retrieve all levels")
+                cert_level = None
+            elif cert_level:
+                print(f"🎯 Detected certification level: {cert_level}")
+        
+            # Expand query
             queries = self._expand_query(question)
             print(f"\n🔍 Generated {len(queries)} query variations")
-            
-            # Step 2: RAG Fusion retrieval
+        
+            # RAG Fusion retrieval
             fusion_docs = self.fusion_retriever.retrieve_with_fusion(
                 queries, 
-                self.config.INITIAL_K
+                self.config.INITIAL_K,
+                filter_cert_level=cert_level
             )
-            
-            # Step 3: Rerank with credibility
+        
+            # Rerank with credibility
             final_docs = self.fusion_retriever.rerank_with_credibility(
                 question, 
                 fusion_docs, 
-                self.config.FINAL_K
+                self.config.FINAL_K if not is_pricing_query else self.config.FINAL_K + 3  # More context for pricing
             )
-            
-            # Step 4: Create context
+        
+            # Create context
             context = "\n\n".join([doc['content'] for doc in final_docs])
             chat_history = self.memory.get_history()
-            
-            # Step 5: Generate answer
+        
+            # Generate answer
             prompt = ADVANCED_PROMPT.format(
                 context=context,
                 question=question,
                 chat_history=chat_history
             )
-            
+        
             completion = self.openai_client.chat.completions.create(
                 model=self.config.LLM_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.config.LLM_TEMPERATURE
-            )
-            
+        )
+        
             answer = completion.choices[0].message.content
-            
-            # Step 6: Guardrails
+        
+            # Guardrails
             validation_result = {"is_valid": True, "confidence": 1.0}
             if self.config.ENABLE_GUARDRAILS:
                 validation_result = self.guardrails.validate_response(question, answer)
                 print(f"🛡️  Guardrails: Valid={validation_result['is_valid']}, "
-                      f"Confidence={validation_result['confidence']:.2f}")
-                
+                    f"Confidence={validation_result['confidence']:.2f}")
+            
                 if not validation_result['is_valid'] or validation_result['confidence'] < self.config.CONFIDENCE_THRESHOLD:
                     answer += "\n\n⚠️ **Note**: I have moderate confidence in this response. " \
-                             "Please verify with IHRP at support@ihrp.sg"
-            
-            # Step 7: Update memory
+                            "Please verify with IHRP at support@ihrp.sg"
+        
+            # Update memory
             self.memory.add_message('user', question)
             self.memory.add_message('assistant', answer)
-            
+        
             # Format response
             result = f"{answer}\n\n"
             result += "───────────────────────────────\n"
             result += "📚 **Sources (Ranked by Relevance + Credibility):**\n"
-            
+        
             seen_sources = set()
             source_count = 0
             sources_list = []
-            
-            for doc in final_docs[:4]:
+        
+            for doc in final_docs[:5]:  # Show more sources for pricing
                 source = doc['metadata'].get('source', 'Unknown')
-                
+                cert_level_meta = doc['metadata'].get('certification_level', 'unknown')
+            
                 if source not in seen_sources:
                     seen_sources.add(source)
                     source_count += 1
                     sources_list.append(source)
-                    
+                
                     cred_score = self.credibility_scorer.get_credibility_score(source)
                     cred_indicator = "🟢" if cred_score >= 0.9 else "🟡" if cred_score >= 0.7 else "🟠"
-                    
+                
                     display_source = source if len(source) < 70 else source[:67] + "..."
-                    result += f"{source_count}. {cred_indicator} {display_source}\n"
-            
+                    level_tag = f" [{cert_level_meta}]" if cert_level_meta != 'unknown' else ""
+                    result += f"{source_count}. {cred_indicator} {display_source}{level_tag}\n"
+        
             metadata = {
                 "question": question,
                 "answer": answer,
                 "sources": sources_list,
+                "detected_level": cert_level,
+                "is_pricing_query": is_pricing_query,
                 "validation": validation_result,
                 "timestamp": datetime.now().isoformat()
             }
-            
+        
             return result, metadata
-            
+        
         except Exception as e:
             print(f"❌ Error: {e}")
             import traceback
@@ -974,8 +1260,7 @@ Negative Feedback: {stats['negative_feedback']} 👎"""
     with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
         gr.Markdown(
             """
-            # 🚀 Ultimate IHRP Support Assistant
-            ### ⚡ No LangChain - Pure & Stable Implementation
+            # IHRP Support Assistant
             
             **Advanced Features:**
             - 🔀 **RAG Fusion** - Multi-strategy retrieval
